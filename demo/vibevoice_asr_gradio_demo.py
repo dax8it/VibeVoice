@@ -1137,8 +1137,7 @@ def create_gradio_interface(
                     label="Upload Audio File or Record from Microphone",
                     sources=["upload", "microphone"],
                     type="filepath",
-                    interactive=True,
-                    buttons=["download"]
+                    interactive=True
                 )
                 
                 with gr.Accordion("📂 Advanced: Remote Path & Time Slicing", open=False):
