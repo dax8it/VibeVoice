@@ -17,6 +17,7 @@ import json
 import re
 from typing import List, Dict, Any, Optional
 from functools import wraps
+from transformers.generation.streamers import BaseStreamer
 
 from vibevoice.modular.modeling_vibevoice_asr import VibeVoiceASRForConditionalGeneration
 from vibevoice.processor.vibevoice_asr_processor import VibeVoiceASRProcessor
@@ -118,6 +119,39 @@ def _select_dtype(device: str) -> torch.dtype:
     if device == "cuda":
         return torch.bfloat16
     return torch.float32
+
+
+class _ProgressStreamer(BaseStreamer):
+    def __init__(self, tokenizer, log_every: int = 50):
+        self.tokenizer = tokenizer
+        self.log_every = max(1, log_every)
+        self.start_time = time.time()
+        self.token_count = 0
+        self.tokens = []
+
+    def put(self, value):
+        if value is None:
+            return
+
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+
+        if isinstance(value, list):
+            if value and isinstance(value[0], list):
+                value = value[0]
+            self.tokens.extend(value)
+            self.token_count = len(self.tokens)
+
+        if self.token_count % self.log_every == 0:
+            elapsed = time.time() - self.start_time
+            decoded = self.tokenizer.decode(self.tokens, skip_special_tokens=True)
+            tail = decoded[-200:]
+            print(
+                f"[progress] {self.token_count} tokens, {elapsed:.1f}s elapsed, tail: {tail}"
+            )
+
+    def end(self):
+        return
 
 
 class VibeVoiceASRBatchInference:
@@ -260,11 +294,16 @@ class VibeVoiceASRBatchInference:
         )
         
         start_time = time.time()
+
+        streamer = None
+        if batch_size == 1:
+            streamer = _ProgressStreamer(self.processor.tokenizer, log_every=50)
         
         with torch.no_grad():
             output_ids = self.model.generate(
                 **inputs,
-                **generation_config
+                **generation_config,
+                streamer=streamer,
             )
         
         generation_time = time.time() - start_time
@@ -559,7 +598,7 @@ def main():
     parser.add_argument(
         "--max_new_tokens",
         type=int,
-        default=32768,
+        default=2048,
         help="Maximum number of tokens to generate"
     )
     parser.add_argument(

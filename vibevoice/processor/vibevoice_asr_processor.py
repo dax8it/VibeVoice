@@ -347,12 +347,24 @@ class VibeVoiceASRProcessor:
             
             # Resample if needed
             if file_sr != self.target_sample_rate:
-                import librosa
-                audio_array = librosa.resample(
-                    audio_array, 
-                    orig_sr=file_sr, 
-                    target_sr=self.target_sample_rate
-                )
+                try:
+                    import librosa
+                    audio_array = librosa.resample(
+                        audio_array,
+                        orig_sr=file_sr,
+                        target_sr=self.target_sample_rate,
+                    )
+                except Exception as e:
+                    warnings.warn(
+                        f"librosa resample failed ({e}); falling back to numpy interpolation"
+                    )
+                    duration = len(audio_array) / float(file_sr)
+                    new_length = int(duration * self.target_sample_rate)
+                    audio_array = np.interp(
+                        np.linspace(0, len(audio_array) - 1, new_length),
+                        np.arange(len(audio_array)),
+                        audio_array,
+                    )
         elif isinstance(audio, torch.Tensor):
             audio_array = audio.cpu().numpy()
             if audio_array.ndim > 1:
