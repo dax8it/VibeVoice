@@ -191,12 +191,30 @@ def _blocks_kwargs(custom_css: str) -> dict:
 
 
 def _safe_launch(demo, **kwargs):
+    def _filter_launch_args(args):
+        try:
+            sig = inspect.signature(demo.launch)
+            return {k: v for k, v in args.items() if k in sig.parameters}
+        except (TypeError, ValueError):
+            return args
+
+    filtered = _filter_launch_args(kwargs)
     try:
-        sig = inspect.signature(demo.launch)
-        filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
-    except (TypeError, ValueError):
-        filtered = kwargs
-    return demo.launch(**filtered)
+        return demo.launch(**filtered)
+    except OSError as e:
+        if "Cannot find empty port" not in str(e):
+            raise
+
+        import socket
+
+        host = filtered.get("server_name", "127.0.0.1")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((host, 0))
+            _, port = s.getsockname()
+
+        print(f"⚠️ Port {filtered.get('server_port')} unavailable, retrying with {port}.")
+        filtered["server_port"] = port
+        return demo.launch(**filtered)
 
 
 class VibeVoiceASRInference:
