@@ -28,6 +28,7 @@ import io
 import traceback
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import inspect
 
 # Import TextIteratorStreamer for streaming generation
 from transformers import TextIteratorStreamer, StoppingCriteria, StoppingCriteriaList
@@ -172,6 +173,30 @@ def _select_dtype(device: str) -> torch.dtype:
     if device == "mps":
         return torch.float16
     return torch.float32
+
+
+def _blocks_kwargs(custom_css: str) -> dict:
+    kwargs = {"title": "VibeVoice ASR Demo"}
+    try:
+        sig = inspect.signature(gr.Blocks)
+    except (TypeError, ValueError):
+        sig = None
+
+    if sig is not None:
+        if "theme" in sig.parameters and hasattr(gr, "themes"):
+            kwargs["theme"] = gr.themes.Soft()
+        if "css" in sig.parameters:
+            kwargs["css"] = custom_css
+    return kwargs
+
+
+def _safe_launch(demo, **kwargs):
+    try:
+        sig = inspect.signature(demo.launch)
+        filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
+    except (TypeError, ValueError):
+        filtered = kwargs
+    return demo.launch(**filtered)
 
 
 class VibeVoiceASRInference:
@@ -1065,8 +1090,7 @@ def create_gradio_interface(
     }
     """
     
-    # Gradio 6.0+ moved theme/css to launch()
-    with gr.Blocks(title="VibeVoice ASR Demo") as demo:
+    with gr.Blocks(**_blocks_kwargs(custom_css)) as demo:
         gr.Markdown("# 🎙️ VibeVoice ASR Demo")
         gr.Markdown("Upload audio files or record from microphone to get speech-to-text transcription with speaker diarization.")
         gr.Markdown(f"**Model loaded from:** `{model_path}`")
@@ -1309,19 +1333,16 @@ def main():
     print(f"🚀 Starting VibeVoice ASR Demo...")
     print(f"📍 Server will be available at: http://{args.host}:{args.port}")
     
-    # Gradio 6.0+ moved theme/css to launch()
     launch_kwargs = {
         "server_name": args.host,
         "server_port": args.port,
         "share": args.share,
         "show_error": True,
-        "theme": gr.themes.Soft(),
-        "css": custom_css,
     }
     
     # Enable queue for concurrent request handling
     demo.queue(default_concurrency_limit=3)
-    demo.launch(**launch_kwargs)
+    _safe_launch(demo, **launch_kwargs)
 
 
 if __name__ == "__main__":

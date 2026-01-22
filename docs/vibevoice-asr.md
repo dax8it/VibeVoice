@@ -52,6 +52,12 @@ cd VibeVoice
 pip install -e .[asr]
 ```
 
+Pinned versions for dev environments:
+
+```bash
+pip install "transformers==4.51.3" "gradio<6.0" "gradio_client<2.0"
+```
+
 ## Usages
 
 ### Usage 1: Launch Gradio demo
