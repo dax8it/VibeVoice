@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union, Callable
+import inspect
 from tqdm import tqdm
 import torch
 import torch.nn as nn
@@ -45,7 +46,10 @@ def _update_model_kwargs_for_generation(
     """
 
     # update past_key_values keeping its naming used in model code
-    model_kwargs["past_key_values"] = getattr(outputs, "past_key_values")
+    past = getattr(outputs, "past_key_values", None)
+    if past is None and isinstance(outputs, dict):
+        past = outputs.get("past_key_values")
+    model_kwargs["past_key_values"] = past
 
     attention_mask = model_kwargs["attention_mask"]
     model_kwargs["attention_mask"] = torch.cat(
@@ -370,7 +374,26 @@ class VibeVoiceStreamingForConditionalGenerationInference(VibeVoiceStreamingPreT
         )
 
         max_cache_length = generation_config.max_length - 1
-        self._prepare_cache_for_generation(generation_config, model_kwargs, batch_size, max_cache_length, device)
+        prepare_cache = self._prepare_cache_for_generation
+        prepare_cache_params = inspect.signature(prepare_cache).parameters
+        if "assistant_model" in prepare_cache_params:
+            assistant_model = kwargs.get("assistant_model")
+            prepare_cache(
+                generation_config,
+                model_kwargs,
+                assistant_model,
+                batch_size,
+                max_cache_length,
+                device,
+            )
+        else:
+            prepare_cache(
+                generation_config,
+                model_kwargs,
+                batch_size,
+                max_cache_length,
+                device,
+            )
         model_kwargs['cache_position'] = torch.arange(input_ids_length, device=device, dtype=torch.long)
         for k, v in model_kwargs.items():
             if isinstance(v, torch.Tensor):
@@ -494,10 +517,15 @@ class VibeVoiceStreamingForConditionalGenerationInference(VibeVoiceStreamingPreT
         reach_max_step_sample = torch.zeros(batch_size, dtype=torch.bool, device=device)
         first_text_window_size = TTS_TEXT_WINDOW_SIZE if tts_text_ids.shape[1] >= TTS_TEXT_WINDOW_SIZE else tts_text_ids.shape[1]
 
-        outputs = all_prefilled_outputs["lm"]
-        tts_lm_outputs = all_prefilled_outputs["tts_lm"]
-        negative_outputs = all_prefilled_outputs["neg_lm"]
-        tts_lm_negative_outputs = all_prefilled_outputs["neg_tts_lm"]
+        def _normalize_output(output):
+            if isinstance(output, dict) and not isinstance(output, ModelOutput):
+                return ModelOutput(**output)
+            return output
+
+        outputs = _normalize_output(all_prefilled_outputs["lm"])
+        tts_lm_outputs = _normalize_output(all_prefilled_outputs["tts_lm"])
+        negative_outputs = _normalize_output(all_prefilled_outputs["neg_lm"])
+        tts_lm_negative_outputs = _normalize_output(all_prefilled_outputs["neg_tts_lm"])
 
         model_kwargs = _update_model_kwargs_for_generation(
             outputs, model_kwargs, num_new_tokens=first_text_window_size,
@@ -505,11 +533,11 @@ class VibeVoiceStreamingForConditionalGenerationInference(VibeVoiceStreamingPreT
         tts_lm_model_kwargs = _update_model_kwargs_for_generation(
             tts_lm_outputs, tts_lm_model_kwargs, num_new_tokens=first_text_window_size,
         )
-        negative_model_kwargs = self._update_model_kwargs_for_generation(
-            negative_outputs, negative_model_kwargs, is_encoder_decoder=False,
+        negative_model_kwargs = _update_model_kwargs_for_generation(
+            negative_outputs, negative_model_kwargs, num_new_tokens=first_text_window_size,
         )
-        tts_lm_negative_model_kwargs = self._update_model_kwargs_for_generation(
-            tts_lm_negative_outputs, tts_lm_negative_model_kwargs, is_encoder_decoder=False,
+        tts_lm_negative_model_kwargs = _update_model_kwargs_for_generation(
+            tts_lm_negative_outputs, tts_lm_negative_model_kwargs, num_new_tokens=first_text_window_size,
         )
 
         step = tts_lm_input_ids.shape[1]

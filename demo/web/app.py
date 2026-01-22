@@ -70,6 +70,73 @@ class StreamingTTSService:
             "on",
         }
 
+    def _detect_model_layout(self, model_dir: Path) -> Tuple[str, list, list, list]:
+        required_base = [
+            "config.json",
+            "preprocessor_config.json",
+        ]
+        weight_candidates = [
+            "model.safetensors",
+            "model.safetensors.index.json",
+            "pytorch_model.bin",
+        ]
+        tokenizer_candidates = [
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "vocab.json",
+            "merges.txt",
+        ]
+
+        found = []
+        missing = []
+
+        for name in required_base:
+            if (model_dir / name).is_file():
+                found.append(name)
+            else:
+                missing.append(name)
+
+        weight_found = [name for name in weight_candidates if (model_dir / name).is_file()]
+        if weight_found:
+            found.extend(weight_found)
+        else:
+            missing.append("model.safetensors or model.safetensors.index.json or pytorch_model.bin")
+
+        tokenizer_found = [name for name in tokenizer_candidates if (model_dir / name).is_file()]
+        found.extend(tokenizer_found)
+
+        voices_dir = BASE.parent / "voices" / "streaming_model"
+        voice_presets = list(voices_dir.rglob("*.pt")) if voices_dir.exists() else []
+        if voice_presets:
+            found.append(f"voices/streaming_model/*.pt ({len(voice_presets)})")
+
+        has_base = not any(name in missing for name in required_base)
+        has_weights = bool(weight_found)
+
+        if has_base and has_weights and tokenizer_found:
+            layout = "Layout A (HF-style)"
+            required = required_base + weight_candidates + [
+                "tokenizer.json or (vocab.json and merges.txt)",
+                "tokenizer_config.json",
+                "special_tokens_map.json",
+            ]
+        elif has_base and has_weights:
+            layout = "Layout B (VibeVoice streaming bundle)"
+            required = required_base + [
+                "model.safetensors or model.safetensors.index.json or pytorch_model.bin",
+                "voices/streaming_model/*.pt",
+            ]
+            if not voice_presets:
+                missing.append("voices/streaming_model/*.pt")
+        else:
+            layout = "Unknown"
+            required = required_base + [
+                "model.safetensors or model.safetensors.index.json or pytorch_model.bin",
+            ]
+
+        return layout, sorted(set(found)), required, sorted(set(missing))
+
     def _resolve_model_dir(self, model_path: str) -> Path:
         raw_path = Path(model_path).expanduser()
         resolved = raw_path if raw_path.is_absolute() else (Path.cwd() / raw_path)
@@ -94,53 +161,37 @@ class StreamingTTSService:
             "Set ALLOW_REMOTE_MODEL_DOWNLOAD=1 to allow remote downloads."
         )
 
-    def _validate_model_dir(self, model_dir: Path) -> None:
-        required_files = [
-            "config.json",
-            "preprocessor_config.json",
-            "tokenizer_config.json",
-            "special_tokens_map.json",
-        ]
-        weight_candidates = [
-            "model.safetensors",
-            "model.safetensors.index.json",
-            "pytorch_model.bin",
-        ]
-        tokenizer_json = model_dir / "tokenizer.json"
-        vocab_file = model_dir / "vocab.json"
-        merges_file = model_dir / "merges.txt"
-
-        missing = [
-            name for name in required_files if not (model_dir / name).is_file()
-        ]
-
-        if not any((model_dir / name).is_file() for name in weight_candidates):
-            missing.append(
-                "model.safetensors or model.safetensors.index.json or pytorch_model.bin"
-            )
-
-        if not (tokenizer_json.is_file() or (vocab_file.is_file() and merges_file.is_file())):
-            missing.append("tokenizer.json or (vocab.json and merges.txt)")
-
-        found = [
-            name for name in required_files if (model_dir / name).is_file()
-        ]
-        found += [name for name in weight_candidates if (model_dir / name).is_file()]
-        if tokenizer_json.is_file():
-            found.append("tokenizer.json")
-        if vocab_file.is_file() and merges_file.is_file():
-            found.append("vocab.json")
-            found.append("merges.txt")
-
+    def _validate_model_dir(self, model_dir: Path, allow_remote: bool) -> None:
+        layout, found, required, missing = self._detect_model_layout(model_dir)
         print(f"[startup] Resolved model directory: {model_dir}")
+        print(f"[startup] Detected model layout: {layout}")
         if found:
-            print(f"[startup] Found files: {', '.join(sorted(set(found)))}")
+            print(f"[startup] Found files: {', '.join(found)}")
+        print(f"[startup] Required for {layout}: {', '.join(required)}")
+
+        tokenizer_missing = not any(
+            name in found
+            for name in ("tokenizer.json", "vocab.json", "merges.txt", "tokenizer_config.json")
+        )
+        if layout == "Layout B (VibeVoice streaming bundle)" and tokenizer_missing:
+            if allow_remote:
+                print(
+                    "[startup] Tokenizer files not found in MODEL_PATH. "
+                    "Tokenizer will be loaded from Hugging Face."
+                )
+            else:
+                print(
+                    "[startup] Tokenizer files not found in MODEL_PATH. "
+                    "If the tokenizer is not already cached locally, set ALLOW_REMOTE_MODEL_DOWNLOAD=1."
+                )
 
         if missing:
             raise ValueError(
                 "MODEL_PATH is missing required files. "
                 f"Resolved path: {model_dir}. "
-                f"Missing: {', '.join(missing)}"
+                f"Detected layout: {layout}. "
+                f"Missing: {', '.join(missing)}. "
+                "MODEL_PATH should point to the directory containing config.json and model weights."
             )
 
     def _select_device(self, device: str) -> str:
@@ -180,10 +231,9 @@ class StreamingTTSService:
                 ) from exc
             raise
 
-        model_dir = self._resolve_model_dir(self.model_path)
-        self._validate_model_dir(model_dir)
-
         allow_remote = self._allow_remote_downloads()
+        model_dir = self._resolve_model_dir(self.model_path)
+        self._validate_model_dir(model_dir, allow_remote)
 
         print(f"[startup] Loading processor from {model_dir}")
         self.processor = VibeVoiceStreamingProcessor.from_pretrained(
@@ -195,7 +245,7 @@ class StreamingTTSService:
         
         # Decide dtype & attention
         if self.device == "mps":
-            load_dtype = torch.float16
+            load_dtype = torch.float32
             device_map = None
             attn_impl_primary = "sdpa"
         elif self.device == "cuda":
@@ -300,9 +350,22 @@ class StreamingTTSService:
                 map_location=self._torch_device,
                 weights_only=False,
             )
-            self._voice_cache[key] = prefilled_outputs
+            self._voice_cache[key] = self._cast_prefilled_outputs(prefilled_outputs)
 
         return self._voice_cache[key]
+
+    def _cast_prefilled_outputs(self, obj: object) -> object:
+        if torch.is_tensor(obj):
+            if self.model is not None:
+                return obj.to(device=self._torch_device, dtype=self.model.dtype)
+            return obj.to(device=self._torch_device)
+        if isinstance(obj, dict):
+            return {k: self._cast_prefilled_outputs(v) for k, v in obj.items()}
+        if isinstance(obj, tuple):
+            return tuple(self._cast_prefilled_outputs(v) for v in obj)
+        if isinstance(obj, list):
+            return [self._cast_prefilled_outputs(v) for v in obj]
+        return obj
 
     def _get_voice_resources(self, requested_key: Optional[str]) -> Tuple[str, object, Path, str]:
         key = requested_key if requested_key and requested_key in self.voice_presets else self.default_voice_key

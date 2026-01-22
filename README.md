@@ -43,6 +43,13 @@ https://github.com/user-attachments/assets/0901d274-f6ae-46ef-a0fd-3c4fba4f76dc
 
 > (Launch your own realtime demo via the websocket example in [Usage](docs/vibevoice-realtime-0.5b.md#usage-1-launch-real-time-websocket-demo)).
 
+Local realtime demo (local model directory required by default):
+
+```bash
+MODEL_PATH=/Users/.../VibeVoice/models/<your-model-folder> MODEL_DEVICE=mps \
+  python -m uvicorn demo.web.app:app --host 127.0.0.1 --port 49692
+```
+
 </div>
 
 2025-09-05: VibeVoice is an open-source research framework intended to advance collaboration in the speech synthesis community. After release, we discovered instances where the tool was used in ways inconsistent with the stated intent. Since responsible use of AI is one of Microsoft’s guiding principles, we have disabled this repo until we are confident that out-of-scope use is no longer possible.

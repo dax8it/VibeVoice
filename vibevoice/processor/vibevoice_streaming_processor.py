@@ -110,19 +110,22 @@ class VibeVoiceStreamingProcessor:
                 "language_model_pretrained_name",
                 "Qwen/Qwen2.5-1.5B",
             )
-            if not allow_remote:
-                raise ValueError(
-                    "Tokenizer files not found in local model directory. "
-                    "Set ALLOW_REMOTE_MODEL_DOWNLOAD=1 to allow remote downloads."
-                )
             tokenizer_source = language_model_pretrained_name
 
         logger.info(f"Loading tokenizer from {tokenizer_source}")
         if 'qwen' in str(tokenizer_source).lower() or has_local_tokenizer:
-            tokenizer = VibeVoiceTextTokenizerFast.from_pretrained(
-                tokenizer_source,
-                **kwargs
-            )
+            try:
+                tokenizer = VibeVoiceTextTokenizerFast.from_pretrained(
+                    tokenizer_source,
+                    **kwargs
+                )
+            except Exception as exc:
+                if not allow_remote:
+                    raise ValueError(
+                        "Tokenizer files not found in local model directory, and tokenizer is not available in the local cache. "
+                        "Set ALLOW_REMOTE_MODEL_DOWNLOAD=1 to allow remote downloads."
+                    ) from exc
+                raise
         else:
             raise ValueError(
                 f"Unsupported tokenizer type for {tokenizer_source}. Supported types: Qwen, Llama, Gemma."
