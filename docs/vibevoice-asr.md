@@ -58,12 +58,18 @@ pip install -e .[asr]
 ```bash
 apt update && apt install ffmpeg -y # for demo
 
-python demo/vibevoice_asr_gradio_demo.py --model_path microsoft/VibeVoice-ASR --share
+python demo/vibevoice_asr_gradio_demo.py --model_path models/VibeVoice-ASR --share
+```
+
+By default the demos require a local model directory. To allow remote downloads, set:
+
+```bash
+ALLOW_REMOTE_MODEL_DOWNLOAD=1
 ```
 
 ### Usage 2: Inference from files directly
 ```bash
-python demo/vibevoice_asr_inference_from_file.py --model_path microsoft/VibeVoice-ASR --audio_files [add a audio path here] 
+python demo/vibevoice_asr_inference_from_file.py --model_path models/VibeVoice-ASR --audio_files [add a audio path here]
 ```
 
 

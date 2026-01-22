@@ -94,7 +94,7 @@ class VibeVoiceASRProcessor:
             self.pad_id = self.tokenizer.convert_tokens_to_ids("<|endoftext|>")
         
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
+    def from_pretrained(cls, pretrained_model_name_or_path, allow_remote: bool = False, **kwargs):
         """
         Load processor from a pretrained model path.
         
@@ -106,9 +106,11 @@ class VibeVoiceASRProcessor:
             VibeVoiceASRProcessor: The loaded processor
         """
         import json
-        from transformers.utils import cached_file
+        from transformers.utils.hub import cached_file
         from vibevoice.modular.modular_vibevoice_text_tokenizer import VibeVoiceASRTextTokenizerFast
         
+        local_files_only = kwargs.pop("local_files_only", not allow_remote)
+
         # Try to load configuration
         config_path = os.path.join(pretrained_model_name_or_path, "preprocessor_config.json")
         config = {}
@@ -117,17 +119,23 @@ class VibeVoiceASRProcessor:
             with open(config_path, 'r') as f:
                 config = json.load(f)
         else:
-            try:
-                config_file = cached_file(
-                    pretrained_model_name_or_path,
-                    "preprocessor_config.json",
-                    **kwargs
+            if allow_remote:
+                try:
+                    config_file = cached_file(
+                        pretrained_model_name_or_path,
+                        "preprocessor_config.json",
+                        local_files_only=local_files_only,
+                        **kwargs
+                    )
+                    with open(config_file, 'r') as f:
+                        config = json.load(f)
+                except Exception as e:
+                    logger.warning(f"Could not load preprocessor_config.json: {e}")
+                    logger.warning("Using default configuration")
+            else:
+                logger.warning(
+                    "preprocessor_config.json not found in local model directory. Using default configuration."
                 )
-                with open(config_file, 'r') as f:
-                    config = json.load(f)
-            except Exception as e:
-                logger.warning(f"Could not load preprocessor_config.json: {e}")
-                logger.warning("Using default configuration")
         
         # Extract parameters
         speech_tok_compress_ratio = config.get("speech_tok_compress_ratio", 3200)
@@ -141,6 +149,7 @@ class VibeVoiceASRProcessor:
         if 'qwen' in language_model_pretrained_name.lower():
             tokenizer = VibeVoiceASRTextTokenizerFast.from_pretrained(
                 language_model_pretrained_name,
+                local_files_only=local_files_only,
                 **kwargs
             )
         else:

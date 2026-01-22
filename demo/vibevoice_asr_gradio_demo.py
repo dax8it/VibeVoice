@@ -50,6 +50,104 @@ from vibevoice.processor.vibevoice_asr_processor import VibeVoiceASRProcessor
 from vibevoice.processor.audio_utils import load_audio_use_ffmpeg, COMMON_AUDIO_EXTS
 
 
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+
+def _allow_remote_downloads() -> bool:
+    return os.environ.get("ALLOW_REMOTE_MODEL_DOWNLOAD", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
+
+def _resolve_model_path(model_path: str) -> tuple[str, bool]:
+    if not model_path:
+        raise ValueError("MODEL_PATH is required and must point to a local model directory.")
+
+    raw_path = Path(model_path).expanduser()
+    resolved = raw_path if raw_path.is_absolute() else (Path.cwd() / raw_path)
+    resolved = resolved.resolve()
+
+    if resolved.is_dir():
+        return str(resolved), True
+
+    if _allow_remote_downloads():
+        return model_path, False
+
+    raise ValueError(
+        "MODEL_PATH must point to a local model directory. "
+        f"Resolved path: {resolved} (not found). "
+        "Set ALLOW_REMOTE_MODEL_DOWNLOAD=1 to allow remote downloads."
+    )
+
+
+def _validate_local_model_dir(model_dir: str) -> None:
+    path = Path(model_dir)
+    required_files = [
+        "config.json",
+    ]
+    weight_candidates = [
+        "model.safetensors",
+        "model.safetensors.index.json",
+        "pytorch_model.bin",
+    ]
+
+    missing = [name for name in required_files if not (path / name).is_file()]
+    if not any((path / name).is_file() for name in weight_candidates):
+        missing.append("model.safetensors or model.safetensors.index.json or pytorch_model.bin")
+
+    found = [name for name in required_files if (path / name).is_file()]
+    found += [name for name in weight_candidates if (path / name).is_file()]
+    if (path / "preprocessor_config.json").is_file():
+        found.append("preprocessor_config.json")
+
+    print(f"[startup] Resolved model directory: {path}")
+    if found:
+        print(f"[startup] Found files: {', '.join(sorted(set(found)))}")
+
+    if missing:
+        raise ValueError(
+            "MODEL_PATH is missing required files. "
+            f"Resolved path: {path}. "
+            f"Missing: {', '.join(missing)}"
+        )
+    if not (path / "preprocessor_config.json").is_file():
+        print("[startup] preprocessor_config.json not found; using default configuration.")
+
+
+def _select_device(device: str) -> str:
+    requested = device
+    if requested == "auto":
+        if torch.cuda.is_available():
+            return "cuda"
+        if torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+    if requested == "cuda":
+        if torch.cuda.is_available():
+            return "cuda"
+        if torch.backends.mps.is_available():
+            print("Warning: CUDA not available. Falling back to MPS.")
+            return "mps"
+        print("Warning: CUDA not available. Falling back to CPU.")
+        return "cpu"
+    if requested == "mps":
+        if torch.backends.mps.is_available():
+            return "mps"
+        print("Warning: MPS not available. Falling back to CPU.")
+        return "cpu"
+    return "cpu"
+
+
+def _select_dtype(device: str) -> torch.dtype:
+    if device == "cuda":
+        return torch.bfloat16
+    return torch.float32
+
+
 class VibeVoiceASRInference:
     """Simple inference wrapper for VibeVoice ASR model."""
     
@@ -63,19 +161,31 @@ class VibeVoiceASRInference:
             dtype: Data type for model weights
             attn_implementation: Attention implementation to use ('flash_attention_2', 'sdpa', 'eager')
         """
-        print(f"Loading VibeVoice ASR model from {model_path}")
+        resolved_path, is_local = _resolve_model_path(model_path)
+        allow_remote = _allow_remote_downloads()
+        if is_local:
+            _validate_local_model_dir(resolved_path)
+        print(f"Loading VibeVoice ASR model from {resolved_path}")
         
+        if device in ("mps", "cpu") and attn_implementation == "flash_attention_2":
+            attn_implementation = "sdpa"
+
         # Load processor
-        self.processor = VibeVoiceASRProcessor.from_pretrained(model_path)
+        self.processor = VibeVoiceASRProcessor.from_pretrained(
+            resolved_path,
+            allow_remote=allow_remote,
+            local_files_only=not allow_remote,
+        )
         
         # Load model
         print(f"Using attention implementation: {attn_implementation}")
         self.model = VibeVoiceASRForConditionalGeneration.from_pretrained(
-            model_path,
-            dtype=dtype,
+            resolved_path,
+            torch_dtype=dtype,
             device_map=device if device == "auto" else None,
             attn_implementation=attn_implementation,
-            trust_remote_code=True
+            trust_remote_code=True,
+            local_files_only=not allow_remote,
         )
         
         if device != "auto":
@@ -474,10 +584,11 @@ def initialize_model(model_path: str, device: str = "cuda", attn_implementation:
     """Initialize the ASR model."""
     global asr_model
     try:
-        dtype = torch.bfloat16 if device != "cpu" else torch.float32
+        selected_device = _select_device(device)
+        dtype = _select_dtype(selected_device)
         asr_model = VibeVoiceASRInference(
             model_path=model_path,
-            device=device,
+            device=selected_device,
             dtype=dtype,
             attn_implementation=attn_implementation
         )
@@ -893,7 +1004,7 @@ def create_gradio_interface(model_path: str, default_max_tokens: int = 8192, att
     """
     
     # Initialize model at startup
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = _select_device("auto")
     model_status = initialize_model(model_path, device, attn_implementation)
     print(model_status)
     
@@ -1111,10 +1222,10 @@ def create_gradio_interface(model_path: str, default_max_tokens: int = 8192, att
 def main():
     parser = argparse.ArgumentParser(description="VibeVoice ASR Gradio Demo")
     parser.add_argument(
-        "--model_path", 
-        type=str, 
-        default="microsoft/VibeVoice-ASR",
-        help="Path to the model (HuggingFace format directory or model name)"
+        "--model_path",
+        type=str,
+        default="models/VibeVoice-ASR",
+        help="Path to local model directory",
     )
     parser.add_argument(
         "--attn_implementation",
