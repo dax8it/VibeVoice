@@ -582,6 +582,13 @@ class VibeVoiceStreamingForConditionalGenerationInference(VibeVoiceStreamingPreT
             if cur_input_tts_text_ids.shape[1] > 0:
                 input_ids = torch.cat([input_ids, cur_input_tts_text_ids], dim=-1)
                 tts_lm_input_ids = torch.cat([tts_lm_input_ids, cur_input_tts_text_ids], dim=-1)
+                tts_lm_negative_input_ids = torch.cat(
+                    [
+                        tts_lm_negative_input_ids,
+                        torch.full_like(cur_input_tts_text_ids, neg_text_input_id),
+                    ],
+                    dim=-1,
+                )
 
                 if tts_lm_input_ids.shape[1] > tts_lm_generation_config.max_length:
                     if verbose:
@@ -617,6 +624,26 @@ class VibeVoiceStreamingForConditionalGenerationInference(VibeVoiceStreamingPreT
                 )
                 tts_lm_model_kwargs = self._update_model_kwargs_for_generation(
                     tts_lm_outputs, tts_lm_model_kwargs, is_encoder_decoder=False,
+                )
+
+                tts_lm_negative_model_inputs = self.prepare_inputs_for_generation(
+                    tts_lm_negative_input_ids, **tts_lm_negative_model_kwargs
+                )
+                tts_lm_negative_additional_inputs = {
+                    "tts_text_masks": torch.ones_like(tts_lm_negative_input_ids[:, -1:]),
+                    "lm_last_hidden_state": outputs.last_hidden_state,
+                }
+                tts_lm_negative_outputs = self.forward_tts_lm(
+                    **tts_lm_negative_model_inputs,
+                    **tts_lm_negative_additional_inputs,
+                    return_dict=True,
+                    output_attentions=False,
+                    output_hidden_states=False,
+                )
+                tts_lm_negative_model_kwargs = self._update_model_kwargs_for_generation(
+                    tts_lm_negative_outputs,
+                    tts_lm_negative_model_kwargs,
+                    is_encoder_decoder=False,
                 )
 
             diffusion_indices = torch.LongTensor([0])
@@ -678,8 +705,8 @@ class VibeVoiceStreamingForConditionalGenerationInference(VibeVoiceStreamingPreT
                         tts_lm_outputs, tts_lm_model_kwargs, num_new_tokens=next_text_window_size,
                     )
                 else:
-                    tts_lm_model_kwargs = self._update_model_kwargs_for_generation(
-                        tts_lm_outputs, tts_lm_model_kwargs, is_encoder_decoder=False,
+                    tts_lm_model_kwargs = _update_model_kwargs_for_generation(
+                        tts_lm_outputs, tts_lm_model_kwargs, num_new_tokens=1,
                     )
 
                 tts_lm_negative_input_ids = torch.cat([tts_lm_negative_input_ids, torch.ones_like(tts_lm_input_ids[:, -1:])], dim=-1)
@@ -692,9 +719,14 @@ class VibeVoiceStreamingForConditionalGenerationInference(VibeVoiceStreamingPreT
                 tts_lm_negative_outputs = self.forward_tts_lm(
                     **tts_lm_negative_model_inputs, **tts_lm_negative_additional_inputs, return_dict=True, output_attentions=False, output_hidden_states=False,
                 )
-                tts_lm_negative_model_kwargs = self._update_model_kwargs_for_generation(
-                    tts_lm_negative_outputs, tts_lm_negative_model_kwargs, is_encoder_decoder=False,
-                )
+                if cur_speech_index == TTS_SPEECH_WINDOW_SIZE - 1 and next_text_window_size > 0:
+                    tts_lm_negative_model_kwargs = _update_model_kwargs_for_generation(
+                        tts_lm_negative_outputs, tts_lm_negative_model_kwargs, num_new_tokens=next_text_window_size,
+                    )
+                else:
+                    tts_lm_negative_model_kwargs = _update_model_kwargs_for_generation(
+                        tts_lm_negative_outputs, tts_lm_negative_model_kwargs, num_new_tokens=1,
+                    )
 
                 tts_eos_logits = torch.sigmoid(self.tts_eos_classifier(tts_lm_outputs.last_hidden_state[diffusion_indices, -1, :]))
                 if tts_eos_logits[0].item() > 0.5:
