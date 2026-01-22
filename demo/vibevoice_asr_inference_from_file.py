@@ -284,12 +284,14 @@ class VibeVoiceASRBatchInference:
                 generated_ids = generated_ids[:eos_positions[0] + 1]
             
             generated_text = self.processor.decode(generated_ids, skip_special_tokens=True)
+            cleaned_text = self.processor.sanitize_json_output(generated_text)
             
             # Parse structured output
             try:
-                transcription_segments = self.processor.post_process_transcription(generated_text)
+                transcription_segments = self.processor.post_process_transcription(cleaned_text)
             except Exception as e:
                 print(f"Warning: Failed to parse structured output: {e}")
+                print(f"Cleaned JSON: {cleaned_text[:500]}...")
                 transcription_segments = []
             
             # Get file name based on input type

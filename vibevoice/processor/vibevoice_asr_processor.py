@@ -24,7 +24,40 @@ except ImportError:
 
 logger = logging.get_logger(__name__)
 
-SYSTEM_PROMPT = "You are a helpful assistant that transcribes audio input into text output in JSON format."
+SYSTEM_PROMPT = (
+    "You are a helpful assistant that transcribes audio input into text output in JSON format. "
+    "Return JSON only without any role prefixes or extra text."
+)
+
+
+def sanitize_asr_json_output(text: str) -> str:
+    cleaned = text.lstrip()
+
+    lines = cleaned.splitlines()
+    if lines:
+        first_line = lines[0].strip().lower()
+        if first_line == "assistant" or first_line.startswith("assistant:"):
+            cleaned = "\n".join(lines[1:]).lstrip()
+
+    first_brace = cleaned.find("{")
+    first_bracket = cleaned.find("[")
+    starts = [idx for idx in (first_brace, first_bracket) if idx != -1]
+    if not starts:
+        return cleaned.strip()
+
+    start = min(starts)
+    stack = []
+    pairs = {"{": "}", "[": "]"}
+    for i in range(start, len(cleaned)):
+        char = cleaned[i]
+        if char in pairs:
+            stack.append(pairs[char])
+        elif stack and char == stack[-1]:
+            stack.pop()
+            if not stack:
+                return cleaned[start:i + 1].strip()
+
+    return cleaned[start:].strip()
 
 
 class VibeVoiceASRProcessor: 
@@ -495,6 +528,9 @@ class VibeVoiceASRProcessor:
         Forwards to tokenizer's decode method.
         """
         return self.tokenizer.decode(*args, **kwargs)
+
+    def sanitize_json_output(self, text: str) -> str:
+        return sanitize_asr_json_output(text)
     
     def post_process_transcription(self, text: str) -> List[Dict[str, Any]]:
         """
@@ -514,25 +550,7 @@ class VibeVoiceASRProcessor:
                 json_end = text.find("```", json_start)
                 json_str = text[json_start:json_end].strip()
             else:
-                # Try to find JSON array or object
-                json_start = text.find("[")
-                if json_start == -1:
-                    json_start = text.find("{")
-                if json_start != -1:
-                    # Find matching closing bracket
-                    bracket_count = 0
-                    json_end = json_start
-                    for i in range(json_start, len(text)):
-                        if text[i] in "[{":
-                            bracket_count += 1
-                        elif text[i] in "]}":
-                            bracket_count -= 1
-                            if bracket_count == 0:
-                                json_end = i + 1
-                                break
-                    json_str = text[json_start:json_end]
-                else:
-                    json_str = text
+                json_str = sanitize_asr_json_output(text)
             
             # Parse JSON
             result = json.loads(json_str)
@@ -567,7 +585,7 @@ class VibeVoiceASRProcessor:
             
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse JSON from transcription: {e}")
-            logger.debug(f"Raw text: {text}")
+            logger.warning(f"Cleaned JSON: {json_str}")
             return []
         except Exception as e:
             logger.warning(f"Error post-processing transcription: {e}")
