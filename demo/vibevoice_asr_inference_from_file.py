@@ -121,6 +121,88 @@ def _select_dtype(device: str) -> torch.dtype:
     return torch.float32
 
 
+def _parse_bool(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _format_time(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "??:??"
+    total = int(seconds)
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _ensure_output_dir(path_str: str) -> Path:
+    path = Path(path_str)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    path.mkdir(parents=True, exist_ok=True)
+    return path.resolve()
+
+
+def _resolve_output_basename(result: Dict[str, Any], override: Optional[str], index: int, total: int) -> str:
+    if override:
+        if total > 1:
+            return f"{override}_{index}"
+        return override
+    file_name = result.get("file", f"audio_{index}")
+    file_path = Path(str(file_name))
+    if file_path.suffix:
+        return file_path.stem
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", str(file_name))
+
+
+def _write_outputs(
+    result: Dict[str, Any],
+    output_dir: Path,
+    output_basename: str,
+    save_raw: bool,
+) -> Dict[str, str]:
+    json_path = output_dir / f"{output_basename}.asr.json"
+    jsonl_path = output_dir / f"{output_basename}.asr.jsonl"
+    raw_path = output_dir / f"{output_basename}.raw.txt"
+    transcript_path = output_dir / f"{output_basename}.transcript.txt"
+
+    segments = result.get("segments", [])
+    with json_path.open("w", encoding="utf-8") as f:
+        json.dump(segments, f, ensure_ascii=True, indent=2)
+
+    with jsonl_path.open("w", encoding="utf-8") as f:
+        for item in segments:
+            f.write(json.dumps(item, ensure_ascii=True) + "\n")
+
+    if save_raw:
+        raw_text = result.get("cleaned_text") or result.get("raw_text") or ""
+        with raw_path.open("w", encoding="utf-8") as f:
+            f.write(raw_text)
+
+    with transcript_path.open("w", encoding="utf-8") as f:
+        for item in segments:
+            start = _format_time(item.get("start_time"))
+            end = _format_time(item.get("end_time"))
+            speaker = item.get("speaker_id")
+            content = item.get("text") or ""
+            if speaker is None:
+                line = f"[{start}-{end}] {content}".strip()
+            else:
+                line = f"[{start}-{end}] Speaker {speaker}: {content}".strip()
+            f.write(line + "\n")
+
+    output_paths = {
+        "json": str(json_path),
+        "jsonl": str(jsonl_path),
+        "transcript": str(transcript_path),
+    }
+    if save_raw:
+        output_paths["raw"] = str(raw_path)
+    return output_paths
+
+
 class _ProgressStreamer(BaseStreamer):
     def __init__(self, tokenizer, log_every: int = 50):
         self.tokenizer = tokenizer
@@ -344,6 +426,7 @@ class VibeVoiceASRBatchInference:
             results.append({
                 "file": file_name,
                 "raw_text": generated_text,
+                "cleaned_text": cleaned_text,
                 "segments": transcription_segments,
                 "generation_time": generation_time / batch_size,
             })
@@ -602,6 +685,24 @@ def main():
         help="Maximum number of tokens to generate"
     )
     parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="outputs/asr",
+        help="Directory to write ASR outputs"
+    )
+    parser.add_argument(
+        "--output_basename",
+        type=str,
+        default=None,
+        help="Override output file basename (default: audio filename)"
+    )
+    parser.add_argument(
+        "--save_raw",
+        type=_parse_bool,
+        default=True,
+        help="Save raw/cleaned model output text (default: true)"
+    )
+    parser.add_argument(
         "--temperature",
         type=float,
         default=0.0,
@@ -690,6 +791,8 @@ def main():
         do_sample=do_sample,
         num_beams=args.num_beams,
     )
+
+    output_dir = _ensure_output_dir(args.output_dir)
     
     # Print results
     print("\n" + "="*80)
@@ -698,6 +801,18 @@ def main():
     for result in all_results:
         print("\n" + "-"*60)
         print_result(result)
+    print("\n" + "="*80)
+    print("Outputs")
+    print("="*80)
+    for index, result in enumerate(all_results):
+        base = _resolve_output_basename(result, args.output_basename, index, len(all_results))
+        paths = _write_outputs(result, output_dir, base, args.save_raw)
+        print(f"File: {result.get('file')}")
+        print(f"  JSON: {Path(paths['json']).resolve()}")
+        print(f"  JSONL: {Path(paths['jsonl']).resolve()}")
+        print(f"  Transcript: {Path(paths['transcript']).resolve()}")
+        if "raw" in paths:
+            print(f"  Raw: {Path(paths['raw']).resolve()}")
 
 
 if __name__ == "__main__":
