@@ -110,7 +110,14 @@ Note: NVIDIA T4 / Mac M4 Pro achieve realtime in our tests; other devices with w
 
 Due to network latency, the time when audio playback is heard may exceed the ~300 ms first speech chunk generation latency.
 ```bash
-python demo/vibevoice_realtime_demo.py --model_path microsoft/VibeVoice-Realtime-0.5B
+MODEL_PATH=/Users/.../VibeVoice/models/<your-model-folder> MODEL_DEVICE=mps \
+  python -m uvicorn demo.web.app:app --host 127.0.0.1 --port 49692
+```
+
+By default the demo requires a local model directory. To allow remote downloads, set:
+
+```bash
+ALLOW_REMOTE_MODEL_DOWNLOAD=1
 ```
 
 Tip: Just try it on [Colab](https://colab.research.google.com/github/microsoft/VibeVoice/blob/main/demo/vibevoice_realtime_colab.ipynb).
@@ -118,7 +125,7 @@ Tip: Just try it on [Colab](https://colab.research.google.com/github/microsoft/V
 ### Usage 2: Inference from files directly
 ```bash
 # We provide some example scripts under demo/text_examples/ for demo
-python demo/realtime_model_inference_from_file.py --model_path microsoft/VibeVoice-Realtime-0.5B --txt_path demo/text_examples/1p_vibevoice.txt --speaker_name Carter
+python demo/realtime_model_inference_from_file.py --model_path models/VibeVoice-Realtime-0.5B --txt_path demo/text_examples/1p_vibevoice.txt --speaker_name Carter
 ```
 
 ### [Optional] More experimental voices 

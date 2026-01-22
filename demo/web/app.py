@@ -48,7 +48,6 @@ class StreamingTTSService:
         device: str = "cuda",
         inference_steps: int = 5,
     ) -> None:
-        # Keep model_path as string for HuggingFace repo IDs (Path() converts / to \ on Windows)
         self.model_path = model_path
         self.inference_steps = inference_steps
         self.sample_rate = SAMPLE_RATE
@@ -61,6 +60,88 @@ class StreamingTTSService:
 
         self.device = self._select_device(device)
         self._torch_device = torch.device(self.device)
+
+    def _allow_remote_downloads(self) -> bool:
+        return os.environ.get("ALLOW_REMOTE_MODEL_DOWNLOAD", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
+
+    def _resolve_model_dir(self, model_path: str) -> Path:
+        raw_path = Path(model_path).expanduser()
+        resolved = raw_path if raw_path.is_absolute() else (Path.cwd() / raw_path)
+        resolved = resolved.resolve()
+
+        if resolved.is_dir():
+            return resolved
+
+        if self._allow_remote_downloads():
+            from huggingface_hub import snapshot_download
+
+            print(
+                "[startup] MODEL_PATH does not exist locally. "
+                "ALLOW_REMOTE_MODEL_DOWNLOAD=1 detected; downloading from Hugging Face."
+            )
+            local_dir = snapshot_download(repo_id=model_path)
+            return Path(local_dir).resolve()
+
+        raise ValueError(
+            "MODEL_PATH must point to a local model directory. "
+            f"Resolved path: {resolved} (not found). "
+            "Set ALLOW_REMOTE_MODEL_DOWNLOAD=1 to allow remote downloads."
+        )
+
+    def _validate_model_dir(self, model_dir: Path) -> None:
+        required_files = [
+            "config.json",
+            "preprocessor_config.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+        ]
+        weight_candidates = [
+            "model.safetensors",
+            "model.safetensors.index.json",
+            "pytorch_model.bin",
+        ]
+        tokenizer_json = model_dir / "tokenizer.json"
+        vocab_file = model_dir / "vocab.json"
+        merges_file = model_dir / "merges.txt"
+
+        missing = [
+            name for name in required_files if not (model_dir / name).is_file()
+        ]
+
+        if not any((model_dir / name).is_file() for name in weight_candidates):
+            missing.append(
+                "model.safetensors or model.safetensors.index.json or pytorch_model.bin"
+            )
+
+        if not (tokenizer_json.is_file() or (vocab_file.is_file() and merges_file.is_file())):
+            missing.append("tokenizer.json or (vocab.json and merges.txt)")
+
+        found = [
+            name for name in required_files if (model_dir / name).is_file()
+        ]
+        found += [name for name in weight_candidates if (model_dir / name).is_file()]
+        if tokenizer_json.is_file():
+            found.append("tokenizer.json")
+        if vocab_file.is_file() and merges_file.is_file():
+            found.append("vocab.json")
+            found.append("merges.txt")
+
+        print(f"[startup] Resolved model directory: {model_dir}")
+        if found:
+            print(f"[startup] Found files: {', '.join(sorted(set(found)))}")
+
+        if missing:
+            raise ValueError(
+                "MODEL_PATH is missing required files. "
+                f"Resolved path: {model_dir}. "
+                f"Missing: {', '.join(missing)}"
+            )
 
     def _select_device(self, device: str) -> str:
         requested = device
@@ -99,8 +180,17 @@ class StreamingTTSService:
                 ) from exc
             raise
 
-        print(f"[startup] Loading processor from {self.model_path}")
-        self.processor = VibeVoiceStreamingProcessor.from_pretrained(self.model_path)
+        model_dir = self._resolve_model_dir(self.model_path)
+        self._validate_model_dir(model_dir)
+
+        allow_remote = self._allow_remote_downloads()
+
+        print(f"[startup] Loading processor from {model_dir}")
+        self.processor = VibeVoiceStreamingProcessor.from_pretrained(
+            str(model_dir),
+            allow_remote=allow_remote,
+            local_files_only=not allow_remote,
+        )
 
         
         # Decide dtype & attention
@@ -120,10 +210,11 @@ class StreamingTTSService:
         # Load model
         try:
             self.model = VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
-                self.model_path,
+                str(model_dir),
                 torch_dtype=load_dtype,
                 device_map=device_map,
                 attn_implementation=attn_impl_primary,
+                local_files_only=not allow_remote,
             )
         except Exception as e:
             if attn_impl_primary == 'flash_attention_2':
@@ -132,20 +223,22 @@ class StreamingTTSService:
                     print("MPS float16 load failed. Retrying with float32. You can also set PYTORCH_ENABLE_MPS_FALLBACK=1 for unsupported ops.")
                     load_dtype = torch.float32
                 self.model = VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
-                    self.model_path,
+                    str(model_dir),
                     torch_dtype=load_dtype,
                     device_map=self.device,
                     attn_implementation='sdpa',
+                    local_files_only=not allow_remote,
                 )
                 print("Load model with SDPA successfully ")
             else:
                 if self.device == "mps" and load_dtype != torch.float32:
                     print("MPS float16 load failed. Retrying with float32. You can also set PYTORCH_ENABLE_MPS_FALLBACK=1 for unsupported ops.")
                     self.model = VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
-                        self.model_path,
+                        str(model_dir),
                         torch_dtype=torch.float32,
                         device_map=self.device,
                         attn_implementation=attn_impl_primary,
+                        local_files_only=not allow_remote,
                     )
                 else:
                     raise e
@@ -377,11 +470,10 @@ class StreamingTTSService:
         return pcm.tobytes()
 
 
-app = FastAPI()
+from contextlib import asynccontextmanager
 
-
-@app.on_event("startup")
-async def _startup() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     model_path = os.environ.get("MODEL_PATH")
     if not model_path:
         raise RuntimeError("MODEL_PATH not set in environment")
@@ -395,10 +487,17 @@ async def _startup() -> None:
     service.load()
 
     app.state.tts_service = service
-    app.state.model_path = model_path
+    app.state.model_path = str(service._resolve_model_dir(model_path))
     app.state.device = device
     app.state.websocket_lock = asyncio.Lock()
     print("[startup] Model ready.")
+
+    yield
+
+    # Shutdown code if needed
+    pass
+
+app = FastAPI(lifespan=lifespan)
 
 
 def streaming_tts(text: str, **kwargs) -> Iterator[np.ndarray]:

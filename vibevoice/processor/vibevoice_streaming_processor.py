@@ -37,7 +37,7 @@ class VibeVoiceStreamingProcessor:
         self.audio_normalizer = AudioNormalizer() if db_normalize else None
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
+    def from_pretrained(cls, pretrained_model_name_or_path, allow_remote: bool = False, **kwargs):
         """
         Instantiate a VibeVoiceStreamingProcessor from a pretrained VibeVoice Streaming processor.
 
@@ -59,7 +59,7 @@ class VibeVoiceStreamingProcessor:
             VibeVoiceTextTokenizerFast
         )
         
-        # Try to load from local path first, then from HF hub
+        # Try to load from local path first, then from HF hub if allowed
         config_path = os.path.join(pretrained_model_name_or_path, "preprocessor_config.json")
         config = None
         
@@ -68,37 +68,65 @@ class VibeVoiceStreamingProcessor:
             with open(config_path, 'r') as f:
                 config = json.load(f)
         else:
-            # Try to load from HF hub
-            try:
-                config_file = cached_file(
-                    pretrained_model_name_or_path,
-                    "preprocessor_config.json",
-                    **kwargs
+            if allow_remote:
+                # Try to load from HF hub
+                try:
+                    config_file = cached_file(
+                        pretrained_model_name_or_path,
+                        "preprocessor_config.json",
+                        **kwargs
+                    )
+                    with open(config_file, 'r') as f:
+                        config = json.load(f)
+                except Exception as e:
+                    logger.warning(f"Could not load preprocessor_config.json from {pretrained_model_name_or_path}: {e}")
+                    logger.warning("Using default configuration")
+                    config = {
+                        "speech_tok_compress_ratio": 3200,
+                        "db_normalize": True,
+                    }
+            else:
+                raise ValueError(
+                    "preprocessor_config.json not found in local model directory. "
+                    "Set ALLOW_REMOTE_MODEL_DOWNLOAD=1 to allow remote downloads."
                 )
-                with open(config_file, 'r') as f:
-                    config = json.load(f)
-            except Exception as e:
-                logger.warning(f"Could not load preprocessor_config.json from {pretrained_model_name_or_path}: {e}")
-                logger.warning("Using default configuration")
-                config = {
-                    "speech_tok_compress_ratio": 3200,
-                    "db_normalize": True,
-                }
         
         # Extract main processor parameters
         speech_tok_compress_ratio = config.get("speech_tok_compress_ratio", 3200)
         db_normalize = config.get("db_normalize", True)
         
-        # Load tokenizer - try from model path first, then fallback to Qwen        
-        language_model_pretrained_name = config.get("language_model_pretrained_name", None) or kwargs.pop("language_model_pretrained_name", "Qwen/Qwen2.5-1.5B")
-        logger.info(f"Loading tokenizer from {language_model_pretrained_name}")
-        if 'qwen' in language_model_pretrained_name.lower():
+        # Load tokenizer - prefer local tokenizer files in the model directory
+        local_tokenizer_json = os.path.join(pretrained_model_name_or_path, "tokenizer.json")
+        local_vocab = os.path.join(pretrained_model_name_or_path, "vocab.json")
+        local_merges = os.path.join(pretrained_model_name_or_path, "merges.txt")
+        has_local_tokenizer = os.path.exists(local_tokenizer_json) or (
+            os.path.exists(local_vocab) and os.path.exists(local_merges)
+        )
+
+        if has_local_tokenizer:
+            tokenizer_source = pretrained_model_name_or_path
+        else:
+            language_model_pretrained_name = config.get("language_model_pretrained_name", None) or kwargs.pop(
+                "language_model_pretrained_name",
+                "Qwen/Qwen2.5-1.5B",
+            )
+            if not allow_remote:
+                raise ValueError(
+                    "Tokenizer files not found in local model directory. "
+                    "Set ALLOW_REMOTE_MODEL_DOWNLOAD=1 to allow remote downloads."
+                )
+            tokenizer_source = language_model_pretrained_name
+
+        logger.info(f"Loading tokenizer from {tokenizer_source}")
+        if 'qwen' in str(tokenizer_source).lower() or has_local_tokenizer:
             tokenizer = VibeVoiceTextTokenizerFast.from_pretrained(
-                language_model_pretrained_name,
+                tokenizer_source,
                 **kwargs
             )
         else:
-            raise ValueError(f"Unsupported tokenizer type for {language_model_pretrained_name}. Supported types: Qwen, Llama, Gemma.")
+            raise ValueError(
+                f"Unsupported tokenizer type for {tokenizer_source}. Supported types: Qwen, Llama, Gemma."
+            )
         
         # Load audio processor
         if "audio_processor" in config:
