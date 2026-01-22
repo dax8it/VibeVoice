@@ -1,6 +1,14 @@
 #!/usr/bin/env python
 """
 VibeVoice ASR Gradio Demo
+
+MODEL_PATH usage:
+- CLI flag --model_path overrides everything
+- Otherwise MODEL_PATH env var is used
+- Default: <repo_root>/models/VibeVoice-ASR
+
+Smoke test:
+- python demo/vibevoice_asr_gradio_demo.py --model_path "<repo_root>/models/VibeVoice-ASR" --device mps
 """
 
 import os
@@ -63,6 +71,14 @@ def _allow_remote_downloads() -> bool:
     }
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _default_model_dir() -> Path:
+    return _repo_root() / "models" / "VibeVoice-ASR"
+
+
 def _resolve_model_path(model_path: str) -> tuple[str, bool]:
     if not model_path:
         raise ValueError("MODEL_PATH is required and must point to a local model directory.")
@@ -77,10 +93,18 @@ def _resolve_model_path(model_path: str) -> tuple[str, bool]:
     if _allow_remote_downloads():
         return model_path, False
 
+    models_root = _repo_root() / "models"
+    if models_root.exists():
+        available = ", ".join(sorted(p.name for p in models_root.iterdir() if p.is_dir()))
+    else:
+        available = "(models directory not found)"
+
     raise ValueError(
         "MODEL_PATH must point to a local model directory. "
         f"Resolved path: {resolved} (not found). "
-        "Set ALLOW_REMOTE_MODEL_DOWNLOAD=1 to allow remote downloads."
+        f"Available under {models_root}: {available}. "
+        "Set --model_path or MODEL_PATH to a valid local path, or set "
+        "ALLOW_REMOTE_MODEL_DOWNLOAD=1 to allow remote downloads."
     )
 
 
@@ -145,6 +169,8 @@ def _select_device(device: str) -> str:
 def _select_dtype(device: str) -> torch.dtype:
     if device == "cuda":
         return torch.bfloat16
+    if device == "mps":
+        return torch.float16
     return torch.float32
 
 
@@ -166,6 +192,7 @@ class VibeVoiceASRInference:
         if is_local:
             _validate_local_model_dir(resolved_path)
         print(f"Loading VibeVoice ASR model from {resolved_path}")
+        print(f"Using device: {device}, torch_dtype: {dtype}")
         
         if device in ("mps", "cpu") and attn_implementation == "flash_attention_2":
             attn_implementation = "sdpa"
@@ -994,7 +1021,12 @@ def transcribe_audio(
         yield f"❌ Error during transcription: {str(e)}", ""
 
 
-def create_gradio_interface(model_path: str, default_max_tokens: int = 8192, attn_implementation: str = "flash_attention_2"):
+def create_gradio_interface(
+    model_path: str,
+    default_max_tokens: int = 8192,
+    attn_implementation: str = "flash_attention_2",
+    device: str = "auto",
+):
     """Create and launch Gradio interface.
     
     Args:
@@ -1004,8 +1036,8 @@ def create_gradio_interface(model_path: str, default_max_tokens: int = 8192, att
     """
     
     # Initialize model at startup
-    device = _select_device("auto")
-    model_status = initialize_model(model_path, device, attn_implementation)
+    selected_device = _select_device(device)
+    model_status = initialize_model(model_path, selected_device, attn_implementation)
     print(model_status)
     
     # Exit if model loading failed
@@ -1017,7 +1049,7 @@ def create_gradio_interface(model_path: str, default_max_tokens: int = 8192, att
         print("  1. Model path is correct")
         print("  2. Model files are not corrupted")
         print("  3. You have enough GPU memory")
-        print("  4. CUDA is properly installed (if using GPU)")
+        print("  4. CUDA/MPS is properly installed (if using GPU)")
         print("="*80)
         sys.exit(1)
     
@@ -1224,8 +1256,15 @@ def main():
     parser.add_argument(
         "--model_path",
         type=str,
-        default="models/VibeVoice-ASR",
+        default=None,
         help="Path to local model directory",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["cuda", "mps", "cpu", "auto"],
+        help="Device to run inference on (default: auto)",
     )
     parser.add_argument(
         "--attn_implementation",
@@ -1260,10 +1299,12 @@ def main():
     args = parser.parse_args()
     
     # Create and launch interface
+    model_path = args.model_path or os.environ.get("MODEL_PATH") or str(_default_model_dir())
     demo, custom_css = create_gradio_interface(
-        model_path=args.model_path,
+        model_path=model_path,
         default_max_tokens=args.max_new_tokens,
-        attn_implementation=args.attn_implementation
+        attn_implementation=args.attn_implementation,
+        device=args.device,
     )
     
     print(f"🚀 Starting VibeVoice ASR Demo...")
