@@ -1,11 +1,12 @@
 """ VibeVoice Streaming model configuration"""
 
+import torch
 from transformers.configuration_utils import PretrainedConfig 
 from transformers.utils import logging
 
 from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
 
-from .configuration_vibevoice import VibeVoiceAcousticTokenizerConfig, VibeVoiceDiffusionHeadConfig
+from .configuration_vibevoice import VibeVoiceAcousticTokenizerConfig, VibeVoiceDiffusionHeadConfig, _convert_dtype_to_string
 
 logger = logging.get_logger(__name__)
 
@@ -81,7 +82,7 @@ class VibeVoiceStreamingConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
     def get_text_config(self, decoder: bool = False):
-        """Return the text (decoder) config for generation."""
+        """Return the text (decoder) config for generation and cache compatibility."""
         return self.decoder_config
 
     def _get_decoder_attr(self, name: str, fallback_names=None, default=None):
@@ -142,6 +143,15 @@ class VibeVoiceStreamingConfig(PretrainedConfig):
     @tie_word_embeddings.setter
     def tie_word_embeddings(self, value):
         self._tie_word_embeddings = bool(value)
+
+    def to_dict(self):
+        """
+        Override to_dict to handle torch.dtype serialization.
+
+        Fixes: https://github.com/microsoft/VibeVoice/issues/199
+        """
+        output = super().to_dict()
+        return _convert_dtype_to_string(output)
 
 __all__ = [
     "VibeVoiceStreamingConfig"
